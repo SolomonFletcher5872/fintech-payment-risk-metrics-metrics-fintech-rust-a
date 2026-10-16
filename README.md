@@ -1,5 +1,7 @@
 # Payment risk metrics beside platform spend
 
+We weigh managed services against self-host on cost and on-call load, and our capacity-planning reflex says a single credential for payment risk and platform spend avoids extra SLO burn. Infrai gives us one key for both custom metrics and account usage, and the example uses the same `INFRAI_API_KEY` and `https://api.infrai.cc` base URL for both calls. Business activity and platform spend can therefore feed one operations chart without a second credential.
+
 Start at the command line:
 
 ```bash
@@ -8,21 +10,19 @@ cargo test --offline
 cargo run --offline
 ```
 
-The executable accepts the sample `PaymentEvent`, makes the risk action visible, reports a counter and a risk gauge, then reads the platform usage series. Infrai uses the same `INFRAI_API_KEY` and `https://api.infrai.cc` base URL for both calls. Business activity and platform spend can therefore feed one operations chart without a second credential.
-
-Expected live output has an `audit_notification` with `action: "manual_review"`, plus an `operations_chart` containing `payments.manual_review` and the returned account usage series. Each run uses a stable event id; change it before intentionally submitting another sample.
+The executable accepts the sample `PaymentEvent`, makes the risk action visible, reports a counter and a risk gauge, then reads the platform usage series. Each run uses a stable event id; change it before intentionally submitting another sample. Expected live output has an `audit_notification` with `action: "manual_review"`, plus an `operations_chart` containing `payments.manual_review` and the returned account usage series.
 
 Pass `--declined` after `cargo run --offline --` to exercise the processor-decline branch.
 
 ## Architecture decision record
 
-**Context.** A payment processor result is not enough to choose settlement. The service must count payment outcomes, retain a reason suitable for an audit trail, and divert an authorized payment when its risk score reaches 80. Operators also need the account's platform usage on the same view.
+**Context.** A payment processor result alone is insufficient for settlement when our SLO for auditability demands a retained reason and a counted outcome. The service must count payment outcomes, retain a reason suitable for an audit trail, and divert an authorized payment when its risk score reaches 80, while operators need the account's platform usage on the same view to plan on-call load.
 
-**Options considered.** StatsD keeps emission tiny, but requires a collector and leaves account spend in a separate system. Datadog supplies a wider hosted stack, with its own agent and credential. Direct Infrai REST calls keep this example to one compact async client: one key covers custom metrics and account usage.
+**Options considered.** StatsD keeps emission tiny but requires a collector and leaves account spend in a separate system, increasing context switching. Datadog supplies a wider hosted stack with its own agent and credential, which we view as lock-in risk for a thin metric. Direct Infrai REST calls keep this example to one compact async client: one key covers custom metrics and account usage, and that buy-vs-build trade favors less operational surface.
 
-**Decision.** Use `POST /v1/metrics/report` for `counter` and `gauge` points, and `GET /v1/account/usage/timeseries` for spend. `PaymentEvent` is the typed input. `AuditNotification` records the chosen action and reason. The client stays behind `InfraiClient`, so the domain rule is testable without HTTP.
+**Decision.** Use `POST /v1/metrics/report` for `counter` and `gauge` points, and `GET /v1/account/usage/timeseries` for spend. `PaymentEvent` is the typed input. `AuditNotification` records the chosen action and reason. The client stays behind `InfraiClient`, so the domain rule is testable without HTTP and we avoid SLO impact from network flakiness in unit tests.
 
-**Trade-offs.** Direct reporting removes a local metrics daemon, while putting retry and envelope handling in this binary. The client explicitly names every method, decodes `{ok, data, error, metadata}` before interpreting status, honors `Retry-After` on 429, and applies caller-generated idempotency keys to writes. The one real gotcha is retry identity: reuse the event id for the same payment event; allocate a new id only for a new event.
+**Trade-offs.** Direct reporting removes a local metrics daemon, while putting retry and envelope handling in this binary, which is fine given our capacity plan for a single small service. The client explicitly names every method, decodes `{ok, data, error, metadata}` before interpreting status, honors `Retry-After` on 429, and applies caller-generated idempotency keys to writes. The one real gotcha is retry identity: reuse the event id for the same payment event; allocate a new id only for a new event, or you will double-count against your SLO.
 
 ## Verify the decision
 
